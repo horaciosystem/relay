@@ -1,0 +1,14 @@
+{
+  "name": "relay",
+  "owner": {
+    "name": "horaciosystem"
+  },
+  "plugins": [
+    {
+      "name": "relay",
+      "source": "./",
+      "description": "Speed-first orchestration: Opus plans and reviews, Haiku scouts, Codex and Fable review the plan, Codex and Opus build in two parallel lanes with handoff, Fable as last resort. Codex lanes need the Codex plugin (openai/codex-plugin-cc). One gate: plan approval."
+    }
+  ],
+  "description": "Speed-first multi-model orchestration for Claude Code."
+}

@@ -1,0 +1,11 @@
+{
+  "name": "relay",
+  "displayName": "Relay",
+  "version": "0.5.0",
+  "description": "Speed-first orchestration: Opus plans and reviews, Haiku scouts, Codex and Fable review the plan, Codex and Opus build in two parallel lanes with handoff, Fable as last resort. Codex lanes need the Codex plugin (openai/codex-plugin-cc). One gate: plan approval.",
+  "author": {
+    "name": "horaciosystem"
+  },
+  "repository": "https://github.com/horaciosystem/relay",
+  "homepage": "https://github.com/horaciosystem/relay"
+}
