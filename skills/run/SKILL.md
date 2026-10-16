@@ -1,6 +1,6 @@
 ---
 name: run
-description: Speed-first multi-model orchestration for one task, aimed at 15-20 minutes end to end. The main session plans and reviews; Codex and Fable review the plan; Codex and Opus build in two parallel lanes with handoff when a lane is slow; Haiku scouts do recon; Fable is the last resort. One gate: plan approval. Use for a feature, ticket or multi-file change; skip it for a fix you can make yourself in a few edits.
+description: Speed-first multi-model orchestration for one task, aimed at 15-20 minutes end to end. The main session plans and reviews; Codex and Fable review the plan; Codex and Opus build in two parallel lanes with handoff when a lane is slow; Haiku scouts do recon; Fable is the last resort. Asks only product calls no experiment can settle; logs defaults and reports them at the end. Use for a feature, ticket or multi-file change; skip it for a fix you can make yourself in a few edits.
 ---
 
 You orchestrate. You plan, write the briefs, review every diff, and verify once. Lanes build. Target: 15-20 min wall clock from input to verified diff (smoke tests and PRs excluded).
@@ -14,10 +14,24 @@ Input: $ARGUMENTS (ticket, spec, plan file or description). A named Codex model 
 | 0 Setup + size | 1 min | ≤4 files and no open design question → do it yourself, stop following this skill |
 | 1 Recon | 3 min | Skip scouts when 3 greps answer it |
 | 2 Plan + review | 6 min | Reviewers get 4 min, then proceed with what returned |
-| 3 Build | 15 min | 2-4 slices; both lanes busy; slow slice → handoff |
+| 3 Build | 15 min | 1-4 slices; lanes busy; slow slice → handoff |
 | 4 Verify + report | 20 min | One full check run; fix only failures |
 
 Behind the clock → cut scope you name in the report. Never skip reviewing a diff.
+
+## Questions and decisions
+
+Classify before asking anything:
+
+| The question is | Do |
+|---|---|
+| A fact you could observe: what code does, a type, an output, timing, whether a test passes | Find out: grep, read, run it. Never ask |
+| A reversible choice the repo answers: naming, placement, error handling, test shape | Follow the sibling or the repo convention. Never ask |
+| A product or preference call no experiment can settle, that changes what gets built | Ask at the gate: one line, with your default. Gate skipped or mid-build → apply the default and log it |
+
+- Log every default and every judgment call to `$RUN/decisions.md`: `<decision> | why | what the user could ask for instead`. Report them all at the end.
+- Mid-build, never stop for a decision: log it and continue.
+- Pause only for irreversible actions: force-push, deploy, deleting data, messages to people.
 
 ## 0. Setup
 
@@ -53,7 +67,8 @@ Write `$RUN/plan.md`:
 
 ```
 GOAL: <observable behaviour, 1-3 lines>
-ACCEPT: <checks that prove it: test names, commands, outputs>
+ACCEPT: <checkable predicate: command -> expected result, one per line>
+SPLIT: <why this many slices; "1: coupled, <reason>" is valid>
 CONTRACTS: <exact types/signatures/routes/props shared across slices, as code>
 SLICES:
   S1 lane=codex|opus size=S|M|L hard=no own=<paths, new-file dirs> copy=<path:lines>
@@ -64,7 +79,7 @@ ORDER: <S1 -> S3; S2 independent>
 VERIFY: <typecheck cmd>; <lint cmd>; <tests for changed code>
 ```
 
-Rules: 2-4 slices, split only at real seams, `own` never overlaps. `lane=codex` for volume (wiring, CRUD, renames, tests), `lane=opus` for judgment (state, integration). Budgets: S 4 min, M 8 min, L 12 min.
+Rules: 1-4 slices, split only at real seams, `own` never overlaps. Coupled work (one state model, one migration, files that must change together) is one slice on the Opus lane; the Codex lane may take an independent slice such as tests against the contract. `lane=codex` for volume (wiring, CRUD, renames, tests), `lane=opus` for judgment (state, integration). Budgets: S 4 min, M 8 min, L 12 min.
 
 **Review** only when slices ≥ 3 or contracts cross modules. Both in ONE message, both in the background:
 
@@ -75,11 +90,15 @@ Review line: `Review this plan against the repo. Read-only. Output only concrete
 
 At 4 min, use what has returned. Fold valid defects into the plan; drop style.
 
-**Gate.** Show the slices and one line per reviewer change. Ask "go", plus any product question whose answer changes what gets built. If the user already said to proceed or to work non stop, do not wait. This is the only stop.
+**Gate.** Show the slices, one line per reviewer change, and the product questions with your defaults.
+
+- Product questions and the user has not said to proceed → wait for answers. This is the only stop.
+- No product question, or the user said to proceed or to work non stop → show the plan and continue without waiting; defaults go to `$RUN/decisions.md`.
+- The user asked to approve the plan → wait for "go".
 
 ## 3. Build
 
-After go, in this order:
+After the gate, in this order:
 
 1. Write the CONTRACTS code yourself (types, signatures, stubs), so both lanes compile against it.
 2. Write one brief per slice, `$RUN/S<n>.md`, in exactly this shape. Facts and paths only, no narrative: the builder sees nothing else.
@@ -96,11 +115,11 @@ DO:
 1. ...
 DONE WHEN: <checkable conditions>
 CHECK: <format+lint command on OWN files>; <one targeted test command>
-NEVER: full test suite, typecheck, build, dev server, new dependencies, edits outside OWN, refactors outside the task, questions
+NEVER: full test suite, typecheck, build, dev server, new dependencies, edits outside OWN, refactors outside the task, questions, weakening or deleting a test or assertion to pass, symbols or flags you have not seen in the code or docs
 END WITH:
 STATUS: DONE|BLOCKED|FAILED
 FILES: <paths>
-CHECK: <command -> pass|fail>
+CHECK: <command actually run -> real result>
 DECISIONS: <choices the brief did not make, or none>
 BLOCKER: <path:line + what is needed, or none>
 ```
@@ -126,24 +145,29 @@ One handoff per slice. If the second lane is slow too, let it finish.
 
 Diff = `git diff "$BASE" -- <own>` + every new file in `git status --porcelain -- <own>` + anything changed outside OWN (`git status --porcelain` against `$RUN/status-before`).
 
-- Matches the brief and contracts → accept. A 1-2 line fix → make it yourself.
+- Matches the brief and contracts → accept, and copy its DECISIONS into `$RUN/decisions.md`. A 1-2 line fix → make it yourself.
 - Edits outside OWN → revert them as in Handoff, or keep and own them yourself when needed.
 - Wrong logic or FAILED → the other lane, with the diff and `WRONG: <one line>`.
 - BLOCKED → decide now: change the plan or contract, make the seam edit yourself, or move the file. New brief, fresh agent or task.
-- Failed on both lanes, or a bug with no repro → `relay-solver` (Fable) with the plan, both diffs and the failing output. `NEEDS_USER` → ask that one question.
+- CHECK reported as pass → rerun it yourself before accepting when the diff is not obviously right.
+- Two attempts fail the same check → attack the premise: write in one line the assumption both attempts shared, and test it directly (run, read, print) before any third attempt.
+- Failed on both lanes, or a bug with no repro → `relay-solver` (Fable) with the plan, both diffs, the failing output and the premise test. `NEEDS_USER` → ask that one question.
 
 Every attempt is a fresh agent or Codex task.
 
 ## 5. Verify, report, record
 
-Queue empty and lanes idle → run VERIFY once yourself: typecheck, lint, the tests for changed code. Fix failures with a small edit or one fresh slice; rerun only what failed.
+Queue empty and lanes idle → run VERIFY and every ACCEPT check once yourself. Fix failures with a small edit or one fresh slice; rerun only what failed. Never weaken ACCEPT, a test or an assertion to get green: cut scope instead and name it.
 
 Report:
 
 - per slice: what it built, the lane, any handoff;
 - what the reviewers caught;
-- verification commands and real results;
+- VERIFY and ACCEPT commands with their real results;
+- decisions taken, from `$RUN/decisions.md`: each with why and what the user could ask for instead;
 - scope cut and anything left open.
+
+Every claim carries its evidence in the same line: measured (the command and its result), inferred (from what), or guess. No link, path or reference you did not open this run. Never hand the user a check you could run.
 
 Record (handoffs and solver calls count as escalations):
 

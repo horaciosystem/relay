@@ -32,7 +32,7 @@ the Codex plugin, relay runs the Opus lane only and Fable reviews the plan alone
 |---|---|---|
 | 0 Setup | 1 min | Finds the Codex plugin, snapshots the working tree, looks up the repo's check commands. A task of 4 files or fewer with no open design question is done directly, without orchestration |
 | 1 Recon | 3 min | Haiku scouts, only for what a few greps can't answer |
-| 2 Plan | 6 min | A plan file with goal, acceptance checks, contracts and 2-4 slices. Codex and Fable review it (only for 3+ slices or cross-module contracts), with 4 minutes to answer. Then the one gate: you say "go" |
+| 2 Plan | 6 min | A plan file with goal, acceptance checks, contracts and 1-4 slices. Codex and Fable review it (only for 3+ slices or cross-module contracts), with 4 minutes to answer. Then the gate, which waits only when there is a product question |
 | 3 Build | 15 min | Both lanes build from one queue |
 | 4 Verify | 20 min | Typecheck, lint and the tests for the changed code, once |
 
@@ -41,8 +41,26 @@ skips reviewing a diff.
 
 ## How a run works
 
-**Plan.** Every slice owns its own files (no overlap), names the existing code to copy, has a
-lane, a size and a budget (S 4 min, M 8, L 12), and one targeted check.
+**Fewer questions.** Before asking anything, relay sorts the question:
+
+- a fact it could observe (what the code does, an output, whether a test passes): it finds out;
+- a reversible choice the repo answers (naming, placement, test shape): it follows the repo;
+- a product call no experiment can settle: it asks once, at the plan gate, with its default.
+
+If you said to proceed or to work non stop, or the question comes up mid-build, relay applies
+the default and keeps going. Every default and judgment call is logged and listed in the final
+report, with what you could ask for instead. It pauses only for irreversible actions
+(force-push, deploys, deleting data, messages to people).
+
+**Plan.** Done is a checkable predicate: ACCEPT lists commands with their expected results,
+and relay never weakens it, a test or an assertion to reach green; it cuts scope and says so.
+Every slice owns its own files (no overlap), names the existing code to copy, has a lane, a
+size and a budget (S 4 min, M 8, L 12), and one targeted check. Coupled work (one state model,
+one migration) stays one slice on the Opus lane, and the plan says why; splitting it would only
+add handoffs.
+
+**The gate.** Relay shows the plan and waits only when there is a product question, or when you
+asked to approve the plan. Otherwise it goes straight to the build.
 
 **Briefs written for models.** Each slice gets a brief file in a fixed shape: TASK, REPO, OWN,
 READ, COPY, CONTRACT, DO, DONE WHEN, CHECK, NEVER, and an END WITH block the builder fills in
@@ -65,10 +83,17 @@ changed. Reverts restore only that slice's files from the snapshot; relay never 
 
 **Review.** Every result is read against the brief: the diff from the snapshot, new files, and
 anything touched outside the slice. Small fixes the orchestrator makes itself; wrong logic goes
-to the other lane; a slice both lanes fail goes to Fable.
+to the other lane. When two attempts fail the same check, relay writes down the assumption both
+shared and tests it before a third try. A slice both lanes fail goes to Fable, with that test.
 
-**Verify and report.** One full check run, then a report of what each slice built and on
-which lane, what the reviewers caught, the check results and what is left open. It never
+**No invented facts.** Builders grep a symbol, flag or API before using it, and report the
+check they actually ran with its real result. Scouts cite only lines they opened. In the final
+report every claim is marked measured (with the command), inferred or guess, and relay never
+hands you a check it could run itself.
+
+**Verify and report.** One run of the full checks and the ACCEPT predicate, then a report of
+what each slice built and on which lane, what the reviewers caught, the check results, the
+decisions taken and what is left open. It never
 commits, pushes or opens a PR unless you ask.
 
 ## Guard rails

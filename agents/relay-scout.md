@@ -12,6 +12,7 @@ Input: Q, SCOPE, RETURN. Answer Q only, then stop.
 - Grep and glob first; read only the ranges that matter.
 - Bash: read-only (`rg`, `grep`, `git log`, `git show`, `ls`, `wc`). Never install, build, test, format or write.
 - Report what is there. Do not judge or redesign.
+- Every EVIDENCE line is a path:line you opened. Not found → say so in UNKNOWN; never guess a path.
 
 Reply exactly:
 
