@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/context-cap.py\"",
+            "command": "in=$(cat); case \"$in\" in *relay-scout*|*relay-builder*) command -v python3 >/dev/null 2>&1 && printf '%s' \"$in\" | python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/context-cap.py\";; esac",
             "timeout": 5
           }
         ]
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/stats.py\" nudge 2>/dev/null || true",
+            "command": "command -v python3 >/dev/null 2>&1 || exit 0; python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/stats.py\" nudge 2>/dev/null || true",
             "timeout": 15
           }
         ]
@@ -28,7 +28,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "(python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/stats.py\" report --quiet >/dev/null 2>&1 &) ; true",
+            "command": "command -v python3 >/dev/null 2>&1 || exit 0; (python3 \"${CLAUDE_PLUGIN_ROOT}/scripts/stats.py\" report --quiet >/dev/null 2>&1 &) ; true",
             "timeout": 5
           }
         ]

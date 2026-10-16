@@ -4,101 +4,80 @@ Speed-first multi-model orchestration for Claude Code.
 
 `/relay:run <ticket | spec | plan file | description>`
 
-The main session (Opus) acts as tech lead: it plans, hands the building to two parallel
-lanes, reviews every diff, and runs the checks once at the end. It is built for speed once
-the plan is approved.
+The main session acts as tech lead: it plans, hands the building to two parallel lanes,
+reviews every diff, and runs the checks once at the end. The target is a normal feature or
+multi-file change in **15 to 20 minutes** from the request to a verified diff (smoke tests and
+PRs not included).
 
 ## Who does what
 
 | Role | Model | Job |
 |---|---|---|
-| Orchestrator | your session (Opus 5.5) | Plans, decides the shared types and signatures, reviews every diff, makes one-line fixes, runs the final checks |
-| Scout (`relay-scout`) | Haiku 5.5 | Fast read-only recon: where code lives, which existing feature to copy, call sites |
-| Plan reviewers | Codex and Fable 5.1, in parallel | Look for holes in the plan before anything is built. Read-only |
-| Build lane A | Codex | Implementation slices with lots of mechanical code |
-| Build lane B (`relay-builder-opus`) | Opus 5.5 | Slices that need judgment: tricky state, non-obvious integration |
-| Last resort (`relay-solver`) | Fable 5.1 | A slice both lanes failed, or a bug nobody can reproduce |
+| Orchestrator | your session | Plans, fixes the shared types and signatures, writes the slice briefs, reviews every diff, verifies |
+| Scout (`relay-scout`) | Haiku | Read-only recon: where code lives, the sibling to copy, call sites |
+| Plan reviewers | Codex and Fable, in parallel | Concrete defects in the plan before anything is built. Read-only |
+| Build lane A | Codex | Slices with lots of mechanical code: wiring, CRUD, renames, tests |
+| Build lane B (`relay-builder-opus`) | Opus | Slices that need judgment: state, integration |
+| Last resort (`relay-solver`) | Fable | A slice both lanes failed, or a bug nobody can reproduce |
 
-Codex runs through OpenAI's [Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc)
-(see Install). Without it, relay runs lane B only and uses Fable alone for plan review. To
-pick a Codex model, name it in the task ("codex model gpt-6-astra"); relay passes it on
-every Codex call.
+The agents use the `haiku`, `opus` and `fable` aliases, so they run whatever version your
+Claude Code resolves those to. Codex runs through OpenAI's
+[Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc) (see Install), with
+the model in your `~/.codex/config.toml` unless the task names one ("codex model X"). Without
+the Codex plugin, relay runs the Opus lane only and Fable reviews the plan alone.
 
-`relay-builder` (Sonnet 5.5) is still shipped, but `/relay:run` no longer dispatches to it.
+## The clock
 
-## The steps
+| Phase | Ends by | What happens |
+|---|---|---|
+| 0 Setup | 1 min | Finds the Codex plugin, snapshots the working tree, looks up the repo's check commands. A task of 4 files or fewer with no open design question is done directly, without orchestration |
+| 1 Recon | 3 min | Haiku scouts, only for what a few greps can't answer |
+| 2 Plan | 6 min | A plan file with goal, acceptance checks, contracts and 2-4 slices. Codex and Fable review it (only for 3+ slices or cross-module contracts), with 4 minutes to answer. Then the one gate: you say "go" |
+| 3 Build | 15 min | Both lanes build from one queue |
+| 4 Verify | 20 min | Typecheck, lint and the tests for the changed code, once |
 
-**0. Size check.** If the task is about 1 to 4 files with no open design question, relay
-skips all of this and just does the work.
+When it falls behind the clock, relay cuts scope and names what it cut in the report. It never
+skips reviewing a diff.
 
-**1. Recon.** It writes 2 to 5 sharp questions and sends them to Haiku scouts all at once.
-Then the orchestrator reads the key files the scouts point to itself.
+## How a run works
 
-**2. Plan, then one gate.** It writes a short plan file with four parts:
+**Plan.** Every slice owns its own files (no overlap), names the existing code to copy, has a
+lane, a size and a budget (S 4 min, M 8, L 12), and one targeted check.
 
-- **Goal and acceptance:** what the user should see, in 3 to 5 lines.
-- **Contracts:** the types, function signatures, routes and props that slices share,
-  decided upfront so builders never have to.
-- **Slices:** each one owns its own files (no overlap), names the existing code to copy,
-  prefers a lane, and gets a time budget (S 5 min, M 12, L 20).
-- **Verification:** the repo's real format, lint, typecheck and test commands.
+**Briefs written for models.** Each slice gets a brief file in a fixed shape: TASK, REPO, OWN,
+READ, COPY, CONTRACT, DO, DONE WHEN, CHECK, NEVER, and an END WITH block the builder fills in
+(STATUS, FILES, CHECK, DECISIONS, BLOCKER). Paths and facts only, no narrative. Both lanes get
+the same brief and report in the same shape, so the orchestrator reads results the same way.
 
-Codex and Fable review the plan at the same time. Valid points get folded in; style
-opinions are ignored. Then it shows you the plan and waits for "go". This is the only
-planned stop, and it is skipped if you have already said to proceed without asking.
+**Build.**
 
-**3. Build: two lanes, one queue.**
+- The orchestrator writes the shared types itself first, so both lanes compile against them.
+- A free lane takes the next ready slice instead of idling. At most two heavy jobs run at
+  once: the two lanes.
+- **Handoff:** a slice past its budget, or at 2× the other lane's time for the same size, is
+  stopped. Its partial work is kept or reverted and goes to the free lane with a one-line note.
+  One handoff per slice.
 
-- The orchestrator writes the shared types itself first, so both lanes compile against the
-  same thing.
-- Slices are queued in dependency order. A free lane takes the next ready slice instead of
-  sitting idle.
-- Codex gets a self-contained brief file, since it sees none of the conversation. Opus gets
-  the plan and its slice.
-- At most two heavy jobs run at once, to protect the machine.
-- While the lanes build, the orchestrator reviews finished diffs and writes the next brief.
-- **Handoff when a lane is slow:** if a slice runs past its budget, or takes twice as long
-  as the other lane took for a similar slice, it is stopped. Its partial work goes to the
-  free lane with a note on what is left. A slice is handed over at most once.
+**Your edits are safe.** Before building, relay snapshots the working tree with
+`git stash create` (which changes nothing) and never gives a slice a file you had already
+changed. Reverts restore only that slice's files from the snapshot; relay never runs
+`git checkout`, `git restore` or `git clean`.
 
-**4. Review each result.** The orchestrator reads every diff against the plan:
+**Review.** Every result is read against the brief: the diff from the snapshot, new files, and
+anything touched outside the slice. Small fixes the orchestrator makes itself; wrong logic goes
+to the other lane; a slice both lanes fail goes to Fable.
 
-- A small problem it fixes itself.
-- Wrong logic goes to the other lane, with what was wrong.
-- A blocked builder gets a decision right away: change the plan, make the edit itself, or
-  move the file to another slice.
-- If both lanes fail, the slice goes to Fable. Only if Fable can't decide does it ask you
-  one question.
-
-**5. Verify once, then report.** When the queue is empty, it runs typecheck, lint and the
-relevant tests once. Failures are fixed and only those checks rerun. The report covers:
-
-- what each slice built, and which lane built it;
-- what the plan reviewers caught;
-- the check results;
-- anything left open.
-
-It never commits, pushes or opens a PR unless you ask.
+**Verify and report.** One full check run, then a report of what each slice built and on
+which lane, what the reviewers caught, the check results and what is left open. It never
+commits, pushes or opens a PR unless you ask.
 
 ## Guard rails
 
 - **Context cap:** a PreToolUse hook stops scouts at 60k tokens and builders at 120k
-  (`RELAY_SCOUT_CAP`, `RELAY_BUILDER_CAP`). Past that, the agent has to hand off instead of
-  drifting.
-- **Ownership:** builders format and lint only their own files. The orchestrator owns the
-  contracts, the reviews and the final checks.
-
-## A real run
-
-A refactor that moved a details page onto a new store, copying a sibling module that
-already had it:
-
-- Haiku scouts mapped the page against the sibling module.
-- Codex and Fable reviewed the plan, and the user said "go".
-- Codex and Opus built the slices in parallel.
-- The orchestrator reviewed the diffs, then ran the full checks, E2E tests and a smoke test.
-
-The PR was open after about 44 minutes of working time.
+  (`RELAY_SCOUT_CAP`, `RELAY_BUILDER_CAP`), and they report what is done and left. A shell
+  check skips everything that isn't a relay agent, so it costs a few milliseconds per tool call.
+- **Ownership:** builders run format, lint and one targeted test on their own files. The
+  orchestrator owns the contracts, the reviews and the full checks.
 
 ## Is it helping?
 
@@ -112,9 +91,13 @@ whether verification was green on the first try.
 - Start of a session after 3+ new runs: Claude offers the report.
 - `/relay:report`: builds the scorecard and publishes it as an artifact (same link every time).
 
-Tracking starts the first time the stats run. Data lives in `~/.claude/relay-stats/`.
+Known limits: time and tokens spent inside Codex are not counted yet, and a run's window lasts
+until the next `/relay:run` or the end of the session, so chat after a run counts toward it.
+Data lives in `~/.claude/relay-stats/`.
 
 ## Install
+
+Needs `git` and `python3` (for the hook and the stats; without `python3` they switch off).
 
 In Claude Code:
 
@@ -127,9 +110,8 @@ In Claude Code:
 `/relay:run` and `/relay:report` are now available in every project.
 
 **Optional, for the Codex lane:** install OpenAI's
-[Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc). Without it,
-relay still works with the Opus lane only. The Codex plugin needs the Codex CLI signed in
-to a ChatGPT or OpenAI account:
+[Codex plugin for Claude Code](https://github.com/openai/codex-plugin-cc). It needs the Codex
+CLI signed in to a ChatGPT or OpenAI account:
 
 ```
 /plugin marketplace add openai/codex-plugin-cc
@@ -139,8 +121,9 @@ to a ChatGPT or OpenAI account:
 ```
 
 `/codex:setup` checks the Codex CLI and offers to install it (`npm install -g @openai/codex`).
-If it says you are not signed in, run `!codex login`. Relay finds the plugin at
-`~/.claude/plugins/cache/openai-codex/codex/*/scripts/codex-companion.mjs`.
+If it says you are not signed in, run `!codex login`. Relay looks for the plugin under
+`~/.claude/plugins/cache/openai-codex/`; set `RELAY_CODEX_COMPANION` to the path of
+`codex-companion.mjs` if yours is elsewhere.
 
 **Updating:** `/plugin marketplace update relay`, then `/reload-plugins`.
 
@@ -153,3 +136,7 @@ that session: `claude --plugin-dir <path to the clone>`.
 claude plugin validate --strict .
 python3 -m py_compile hooks/context-cap.py scripts/stats.py
 ```
+
+## License
+
+MIT

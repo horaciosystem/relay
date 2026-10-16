@@ -11,7 +11,7 @@ Commands:
   nudge                SessionStart hook: suggest /relay:report after 3+ new runs
   set-url URL          remember the published report artifact URL
 """
-import argparse, glob, html, json, os, statistics, sys, time
+import argparse, glob, html, json, os, statistics, sys, tempfile, time
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 
@@ -24,6 +24,7 @@ SKIP_PREFIXES = ("/tmp/", "/private/tmp/", "/var/folders/", os.path.join(HOME, "
 EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
 BUCKETS = [("S", "Small (1-4 files)", 1, 4), ("M", "Medium (5-9 files)", 5, 9), ("L", "Large (10+ files)", 10, 10**9)]
 MIN_RELAY, MIN_BASE = 3, 5
+PARSER_VERSION = 2
 
 
 def load(path, default):
@@ -36,8 +37,8 @@ def load(path, default):
 
 def save(path, data):
     os.makedirs(DIR, exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
+    fd, tmp = tempfile.mkstemp(dir=DIR, suffix=".tmp")
+    with os.fdopen(fd, "w") as f:
         json.dump(data, f)
     os.replace(tmp, path)
 
@@ -95,7 +96,7 @@ def counted_path(p):
 def parse_session(path):
     """Return segments: relay windows plus the non-relay part of the session."""
     sid = os.path.basename(path)[:-6]
-    events, agents_by_tool = [], {}
+    events, agents_by_tool, seen_msgs = [], {}, set()
     cwd, models = None, Counter()
     for d in lines(path):
         t = ts(d.get("timestamp"))
@@ -111,8 +112,9 @@ def parse_session(path):
             model = short_model(d.get("requestedModel") or m.get("model"))
             if model != "unknown":
                 models[model] += 1
-            u = m.get("usage") or {}
-            events.append((t, "tokens", (model, u)))
+            if not m.get("id") or m["id"] not in seen_msgs:
+                seen_msgs.add(m.get("id"))
+                events.append((t, "tokens", (model, m.get("usage") or {})))
             for c in m.get("content") or []:
                 if c.get("type") != "tool_use":
                     continue
@@ -133,7 +135,9 @@ def parse_session(path):
             at = spawn[0] if spawn else first_t
             if d.get("type") == "assistant":
                 m = d.get("message", {})
-                events.append((at, "tokens", (short_model(d.get("requestedModel") or m.get("model")), m.get("usage") or {})))
+                if not m.get("id") or m["id"] not in seen_msgs:
+                    seen_msgs.add(m.get("id"))
+                    events.append((at, "tokens", (short_model(d.get("requestedModel") or m.get("model")), m.get("usage") or {})))
                 for c in m.get("content") or []:
                     if c.get("type") == "tool_use" and c.get("name") in EDIT_TOOLS:
                         events.append((at, "edit", c.get("input", {}).get("file_path")))
@@ -168,7 +172,7 @@ def parse_session(path):
         seg["files"] = len(seg["files"])
         seg["tokens"] = dict(seg["tokens"])
         seg["agents"] = dict(seg["agents"])
-        seg["escalations"] = seg["agents"].get("relay-builder-opus", 0) + seg["agents"].get("relay-solver", 0)
+        seg["escalations"] = seg["agents"].get("relay-solver", 0)
         if relay:
             seg["start"] = lo
         return seg
@@ -199,13 +203,13 @@ def scan():
         if st.st_mtime < since:
             continue
         subs = glob.glob(os.path.join(path[:-6], "subagents", "agent-*.jsonl"))
-        sig = [st.st_mtime, st.st_size, len(subs), max((os.path.getmtime(s) for s in subs), default=0)]
+        sig = [PARSER_VERSION, st.st_mtime, st.st_size, len(subs), max((os.path.getmtime(s) for s in subs), default=0)]
         seen.add(path)
         if cache.get(path, {}).get("sig") == sig:
             continue
         try:
             cache[path] = {"sig": sig, "segments": parse_session(path)}
-        except OSError:
+        except Exception:
             continue
     cache = {k: v for k, v in cache.items() if k in seen}
     save(CACHE, cache)
@@ -231,13 +235,20 @@ def attach_ledger(segs):
     by_session = defaultdict(list)
     for r in ledger():
         by_session[r.get("session")].append(r)
+    starts = defaultdict(list)
+    for s in segs:
+        if s["relay"]:
+            starts[s["session"]].append(s["start"])
     for s in segs:
         if not s["relay"]:
             continue
-        recs = [r for r in by_session.get(s["session"], []) if r.get("ts", 0) >= s["start"] - 1]
+        nxt = min((t for t in starts[s["session"]] if t > s["start"]), default=float("inf"))
+        recs = [r for r in by_session.get(s["session"], []) if s["start"] - 1 <= r.get("ts", 0) < nxt]
         s["record"] = min(recs, key=lambda r: r["ts"]) if recs else None
         if s["record"] and (s["record"].get("files") or 0) > s["files"]:
             s["files"] = s["record"]["files"]
+        if s["record"] and s["record"].get("escalations") is not None:
+            s["escalations"] = s["record"]["escalations"]
     return segs
 
 
@@ -330,7 +341,7 @@ def cmd_summary(a):
 
 def cmd_nudge(_):
     segs, state = scan()
-    n = sum(1 for s in segs if s["relay"])
+    n = len(compare(attach_ledger(segs))[1])
     new = n - state.get("reported_runs", 0)
     if new >= 3:
         msg = (f"relay-stats: {new} new /relay:run run(s) since the last report. At a natural pause, "
@@ -352,10 +363,10 @@ def cmd_report(a):
     head = headline(rows, relay, base)
     with open(REPORT, "w") as f:
         f.write(render(rows, relay, base, head, state))
-    state["reported_runs"] = sum(1 for s in segs if s["relay"])
-    state["last_report"] = time.time()
-    save(STATE, state)
     if not a.quiet:
+        state["reported_runs"] = len(relay)
+        state["last_report"] = time.time()
+        save(STATE, state)
         print(json.dumps({"report": REPORT, "artifact_url": state.get("artifact_url"), "headline": head,
                           "relay_runs": len(relay), "opus_sessions": len(base)}, indent=2))
 
@@ -470,7 +481,7 @@ tbody tr:last-child > * {{ border-bottom: 0; }}
 </style>
 <main>
   <header>
-    <div class="eyebrow">/relay:run vs plain Opus 5.5</div>
+    <div class="eyebrow">/relay:run vs plain Opus</div>
     <h1>Relay Scorecard</h1>
     <div class="meta">Tracking since {since} · generated {now}</div>
   </header>
